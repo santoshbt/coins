@@ -1,7 +1,7 @@
-defmodule Poeticoins.Exchanges.CoinbaseClient do
+defmodule Poeticoins.Exchanges.BitstampClient do
   use GenServer
   alias Poeticoins.{Trade, Product}
-  @exchange_name "coinbase"
+  @exchange_name "bitstamp"
 
   def start_link(currency_pairs, options \\[]) do
     GenServer.start_link(__MODULE__, currency_pairs, options)
@@ -19,7 +19,7 @@ defmodule Poeticoins.Exchanges.CoinbaseClient do
     {:noreply, connect(state)}
   end
 
-  def server_host, do: 'ws-feed.pro.coinbase.com'
+  def server_host, do: 'ws.bitstamp.net'
 
   def server_port, do: 443
 
@@ -57,7 +57,7 @@ defmodule Poeticoins.Exchanges.CoinbaseClient do
     handle_ws_message(Jason.decode!(msg), state)
   end
 
-  def handle_ws_message(%{"type" => "ticker"}=msg, state) do
+  def handle_ws_message(%{"event" => "trade"}=msg, state) do
     trade = message_to_trade(msg) |> IO.inspect(label: "trade")
     {:noreply, state}
   end
@@ -73,28 +73,31 @@ defmodule Poeticoins.Exchanges.CoinbaseClient do
   end
 
   defp subscription_frames(currency_pairs) do
+   Enum.map(currency_pairs, &subscription_frame/1)
+  end
+
+  defp subscription_frame(currency_pair) do
     msg = %{
-      "type" => "subscribe",
-      "product_ids" => currency_pairs,
-      "channels" => ["ticker"]
+      "event" => "bts:subscribe",
+      "data" => %{
+        "channel" => "live_trades_#{currency_pair}"
+      }
     } |> Jason.encode!()
-    [{:text, msg}]
+    {:text, msg}
   end
 
   @spec message_to_trade(map) ::
           {:ok, Trade.t()} |
           {:error,any()}
-  def message_to_trade(msg) do
-
-    with :ok <- validate_required(msg, ["product_id", "time", "price", "last_size"]),
-        {:ok, traded_at, _} <- DateTime.from_iso8601(msg["time"])
-
+  def message_to_trade(%{"data" => data, "channel" => "live_trades_" <> currency_pair}=_msg)
+       when is_map(data) do
+    with :ok <- validate_required(data, ["amount_str", "price_str", "timestamp"]),
+        {:ok, traded_at} <- timestmp_to_datetime(data["timestamp"])
     do
-      currency_pair = msg["product_id"]
       Trade.new(
         product: Product.new(@exchange_name, currency_pair),
-        price: msg["price"],
-        volume: msg["last_size"],
+        price: data["price_str"],
+        volume: data["amount_str"],
         traded_at: traded_at
       )
     else
@@ -102,10 +105,17 @@ defmodule Poeticoins.Exchanges.CoinbaseClient do
     end
   end
 
-  # defp datetime_to_string(time_string) do
-  #   {:ok, dt, _} = DateTime.from_iso8601(time_string)
-  #   dt
-  # end
+  def message_to_trade(_msg), do: {:error, :invalid_trade_message}
+
+  @spec timestmp_to_datetime(String.t()) :: {:ok, DateTime.t()} | {:error, atom()}
+  defp timestmp_to_datetime(ts) do
+    case Integer.parse(ts) do
+      {timestamp, _} ->
+          DateTime.from_unix(timestamp)
+      :error ->
+        {:error, :invalid_timestamp_string}
+    end
+  end
 
   @spec validate_required(map(), [String.t()]) :: :ok | {:error, {String.t(), :required}}
   def validate_required(msg, keys) do
